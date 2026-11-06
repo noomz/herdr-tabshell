@@ -10,10 +10,7 @@ fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("toggle") => command_exit(command::run_toggle()),
         Some("shell") => command_exit(command::run_shell()),
-        Some("tab-focused") => {
-            eprintln!("herdr-tabshell: tab-focused not implemented yet");
-            ExitCode::from(2)
-        }
+        Some("tab-focused") => command_exit(command::run_tab_focused()),
         _ => {
             eprintln!("usage: herdr-tabshell <toggle|shell|tab-focused>");
             ExitCode::from(64)

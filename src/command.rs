@@ -87,31 +87,60 @@ fn workspace_state_path(state_dir: &Path, workspace_id: &str) -> PathBuf {
     state_dir.join(format!("float-{encoded}.json"))
 }
 
-fn load_saved_id(path: &Path) -> io::Result<Option<String>> {
+#[derive(Default)]
+struct WorkspaceState {
+    float_id: Option<String>,
+    last_tab_id: Option<String>,
+}
+
+fn load_state(path: &Path) -> io::Result<WorkspaceState> {
     match fs::read_to_string(path) {
         Ok(text) => {
             let value: Value = serde_json::from_str(&text)
                 .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?;
-            Ok(value["float_id"].as_str().map(str::to_owned))
+            Ok(WorkspaceState {
+                float_id: value["float_id"].as_str().map(str::to_owned),
+                last_tab_id: value["last_tab_id"].as_str().map(str::to_owned),
+            })
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(WorkspaceState::default()),
         Err(error) => Err(error),
     }
 }
 
-fn save_id(path: &Path, float_id: &str) -> io::Result<()> {
+fn save_state(path: &Path, state: &WorkspaceState) -> io::Result<()> {
     fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    fs::write(&temp, serde_json::to_vec(&json!({"float_id": float_id}))?)?;
+    fs::write(
+        &temp,
+        serde_json::to_vec(&json!({
+            "float_id": state.float_id,
+            "last_tab_id": state.last_tab_id,
+        }))?,
+    )?;
     fs::rename(temp, path)
 }
 
+fn load_saved_id(path: &Path) -> io::Result<Option<String>> {
+    Ok(load_state(path)?.float_id)
+}
+
+fn save_id(path: &Path, float_id: &str) -> io::Result<()> {
+    let mut state = load_state(path)?;
+    state.float_id = Some(float_id.to_owned());
+    save_state(path, &state)
+}
+
+fn save_last_tab(path: &Path, tab_id: &str) -> io::Result<()> {
+    let mut state = load_state(path)?;
+    state.last_tab_id = Some(tab_id.to_owned());
+    save_state(path, &state)
+}
+
 fn forget_id(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
+    let mut state = load_state(path)?;
+    state.float_id = None;
+    save_state(path, &state)
 }
 
 fn current_state<H: HerdrApi>(
@@ -194,6 +223,7 @@ fn toggle_with<H: HerdrApi>(invocation: &Invocation, api: &mut H, tmux: &Tmux) -
             )?;
             tmux.mark_shown(&invocation.workspace_id, &window_id)?;
             api.call("float.show", json!({"float_id": float_id, "focus": true}))?;
+            save_last_tab(&path, &invocation.tab_id)?;
         }
         FloatState::Absent => {
             let window_id = tmux.ensure_window(
@@ -204,9 +234,59 @@ fn toggle_with<H: HerdrApi>(invocation: &Invocation, api: &mut H, tmux: &Tmux) -
             tmux.mark_shown(&invocation.workspace_id, &window_id)?;
             let opened = api.call("plugin.pane.open", open_params(invocation))?;
             save_id(&path, float_id_from_open(&opened)?)?;
+            save_last_tab(&path, &invocation.tab_id)?;
         }
     }
     Ok(())
+}
+
+fn tab_focused_with<H: HerdrApi>(
+    invocation: &Invocation,
+    api: &mut H,
+    tmux: &Tmux,
+) -> io::Result<()> {
+    fs::create_dir_all(&invocation.state_dir)?;
+    let _lock = Lock::acquire(invocation.state_dir.join("lock"))?;
+    let path = workspace_state_path(&invocation.state_dir, &invocation.workspace_id);
+    let state = load_state(&path)?;
+    if state.float_id.is_none() || state.last_tab_id.as_deref() == Some(&invocation.tab_id) {
+        return Ok(());
+    }
+    if !matches!(
+        current_state(api, &path, &invocation.workspace_id)?,
+        FloatState::Shown(_)
+    ) {
+        return Ok(());
+    }
+    let workspace = api.call(
+        "workspace.get",
+        json!({"workspace_id": invocation.workspace_id}),
+    )?;
+    let tab_id = workspace["workspace"]["active_tab_id"]
+        .as_str()
+        .ok_or_else(|| {
+            io::Error::other("workspace.get response missing workspace.active_tab_id")
+        })?;
+    if state.last_tab_id.as_deref() == Some(tab_id) {
+        return Ok(());
+    }
+    let target = if tab_id == invocation.tab_id {
+        invocation.target()
+    } else {
+        let tab = api.call("tab.get", json!({"tab_id": tab_id}))?;
+        TabTarget {
+            session: invocation.workspace_id.clone(),
+            tab_id: tab_id.to_owned(),
+            label: tab["tab"]["label"]
+                .as_str()
+                .ok_or_else(|| io::Error::other("tab.get response missing tab.label"))?
+                .to_owned(),
+            cwd: None,
+        }
+    };
+    let window_id = tmux.ensure_window(&target, invocation.config.tab_windows, &herdr_env())?;
+    tmux.mark_shown(&invocation.workspace_id, &window_id)?;
+    save_last_tab(&path, tab_id)
 }
 
 fn shell_argv(session: &str) -> Vec<OsString> {
@@ -254,6 +334,12 @@ pub fn run_shell() -> io::Result<()> {
     shell_entry()
 }
 
+pub fn run_tab_focused() -> io::Result<()> {
+    let invocation = Invocation::from_env()?;
+    let tmux = Tmux::herdr_tabshell(&invocation.plugin_root);
+    tab_focused_with(&invocation, &mut SocketHerdr, &tmux)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +382,281 @@ mod tests {
 
     static TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+    fn write_state(invocation: &Invocation, state: Value) -> PathBuf {
+        fs::create_dir_all(&invocation.state_dir).unwrap();
+        let path = workspace_state_path(&invocation.state_dir, &invocation.workspace_id);
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn tab_focused_without_saved_float_does_not_call_herdr_or_start_tmux() {
+        for saved in [None, Some(json!({"last_tab_id": "other-tab"}))] {
+            let root = temp_dir();
+            let invocation = invocation(&root, "workspace-a");
+            if let Some(saved) = saved {
+                write_state(&invocation, saved);
+            }
+            let mut fake = FakeHerdr {
+                responses: Vec::new(),
+                calls: Vec::new(),
+            };
+            let server = TestServer::new();
+            tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
+            assert!(fake.calls.is_empty());
+            assert!(!server.socket.exists());
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn tab_focused_on_last_tab_does_not_call_herdr_or_start_tmux() {
+        let root = temp_dir();
+        let invocation = invocation(&root, "workspace-a");
+        let path = write_state(
+            &invocation,
+            json!({"float_id": "float-1", "last_tab_id": invocation.tab_id}),
+        );
+        let before = fs::read(&path).unwrap();
+        let mut fake = FakeHerdr {
+            responses: Vec::new(),
+            calls: Vec::new(),
+        };
+        let server = TestServer::new();
+        tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
+        assert!(fake.calls.is_empty());
+        assert!(!server.socket.exists());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_focused_hidden_float_only_lists_floats_and_preserves_state() {
+        let root = temp_dir();
+        let invocation = invocation(&root, "workspace-a");
+        let path = write_state(
+            &invocation,
+            json!({"float_id": "float-1", "last_tab_id": "last-tab"}),
+        );
+        let before = fs::read(&path).unwrap();
+        let mut fake = FakeHerdr {
+            responses: vec![json!({"floats": [{"float_id": "float-1", "visibility": "hidden"}]})],
+            calls: Vec::new(),
+        };
+        let server = TestServer::new();
+        tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
+        assert_eq!(fake.calls, vec![("float.list".to_owned(), json!({}))]);
+        assert!(!server.socket.exists());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_focused_shown_float_selects_current_window_and_marks_it_shown() {
+        for existing_window in [false, true] {
+            let root = temp_dir();
+            let mut invocation = invocation(&root, "workspace-a");
+            invocation.focused_pane_cwd = Some(root.to_string_lossy().into_owned());
+            let path = write_state(
+                &invocation,
+                json!({"float_id": "float-1", "last_tab_id": "last-tab"}),
+            );
+            let server = TestServer::new();
+            if existing_window {
+                server
+                    .tmux
+                    .ensure_window(&invocation.target(), true, &[])
+                    .unwrap();
+            }
+            let mut previous = invocation.target();
+            previous.tab_id = "last-tab".to_owned();
+            let previous_id = server.tmux.ensure_window(&previous, true, &[]).unwrap();
+            server.tmux.mark_shown("workspace-a", &previous_id).unwrap();
+            let mut fake = FakeHerdr {
+                responses: vec![
+                    json!({"floats": [{"float_id": "float-1", "visibility": "shown"}]}),
+                    json!({"workspace": {"active_tab_id": "tab-id"}}),
+                ],
+                calls: Vec::new(),
+            };
+            tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
+            assert_eq!(
+                fake.calls,
+                vec![
+                    ("float.list".to_owned(), json!({})),
+                    (
+                        "workspace.get".to_owned(),
+                        json!({"workspace_id": "workspace-a"})
+                    ),
+                ]
+            );
+            let current_id = server.query(&[
+                "display-message",
+                "-p",
+                "-t",
+                "=workspace-a:",
+                "#{window_id}",
+            ]);
+            assert_ne!(current_id, previous_id);
+            assert_eq!(
+                server.query(&[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "=workspace-a:",
+                    "#{@herdr_tab}|#{window_name}|#{@tabshell_shown}"
+                ]),
+                format!("tab-id|dev|{current_id}")
+            );
+            assert_eq!(
+                server
+                    .query(&["list-windows", "-t", "=workspace-a", "-F", "#{window_id}"])
+                    .lines()
+                    .count(),
+                2
+            );
+            let state = load_state(&path).unwrap();
+            assert_eq!(state.float_id.as_deref(), Some("float-1"));
+            assert_eq!(state.last_tab_id.as_deref(), Some("tab-id"));
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn tab_focused_stale_event_with_current_tab_already_seen_changes_nothing() {
+        let root = temp_dir();
+        let invocation = invocation(&root, "workspace-a");
+        let path = write_state(
+            &invocation,
+            json!({"float_id": "float-1", "last_tab_id": "last-tab"}),
+        );
+        let before = fs::read(&path).unwrap();
+        let mut fake = FakeHerdr {
+            responses: vec![
+                json!({"floats": [{"float_id": "float-1", "visibility": "shown"}]}),
+                json!({"workspace": {"active_tab_id": "last-tab"}}),
+            ],
+            calls: Vec::new(),
+        };
+        let server = TestServer::new();
+        tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
+        assert_eq!(fake.calls.len(), 2);
+        assert_eq!(fake.calls[1].0, "workspace.get");
+        assert!(!server.socket.exists());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_focused_stale_event_uses_current_label_and_ignores_event_cwd() {
+        let root = temp_dir();
+        let mut invocation = invocation(&root, "workspace-a");
+        let event_cwd = root.join("event-cwd");
+        fs::create_dir(&event_cwd).unwrap();
+        invocation.focused_pane_cwd = Some(event_cwd.to_string_lossy().into_owned());
+        let path = write_state(&invocation, json!({"float_id": "float-1"}));
+        let mut fake = FakeHerdr {
+            responses: vec![
+                json!({"floats": [{"float_id": "float-1", "visibility": "shown"}]}),
+                json!({"workspace": {"active_tab_id": "current-tab"}}),
+                json!({"tab": {"label": "current label"}}),
+            ],
+            calls: Vec::new(),
+        };
+        let server = TestServer::new();
+        tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
+        assert_eq!(
+            fake.calls[2],
+            ("tab.get".to_owned(), json!({"tab_id": "current-tab"}))
+        );
+        assert_eq!(
+            server.query(&[
+                "display-message",
+                "-p",
+                "-t",
+                "=workspace-a:",
+                "#{@herdr_tab}|#{window_name}"
+            ]),
+            "current-tab|current label"
+        );
+        assert_ne!(
+            server.query(&[
+                "display-message",
+                "-p",
+                "-t",
+                "=workspace-a:",
+                "#{pane_current_path}"
+            ]),
+            event_cwd.to_string_lossy()
+        );
+        assert_eq!(
+            load_state(&path).unwrap().last_tab_id.as_deref(),
+            Some("current-tab")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_float_updates_preserve_last_tab_id() {
+        let root = temp_dir();
+        let invocation = invocation(&root, "workspace-a");
+        let path = write_state(
+            &invocation,
+            json!({"float_id": "old", "last_tab_id": "last-tab"}),
+        );
+        save_id(&path, "new").unwrap();
+        assert_eq!(load_saved_id(&path).unwrap().as_deref(), Some("new"));
+        assert_eq!(
+            load_state(&path).unwrap().last_tab_id.as_deref(),
+            Some("last-tab")
+        );
+        forget_id(&path).unwrap();
+        assert!(load_saved_id(&path).unwrap().is_none());
+        assert_eq!(
+            load_state(&path).unwrap().last_tab_id.as_deref(),
+            Some("last-tab")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_focused_reads_last_tab_only_after_taking_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = temp_dir();
+        let invocation = invocation(&root, "workspace-a");
+        let path = write_state(
+            &invocation,
+            json!({"float_id": "float-1", "last_tab_id": "tab-id"}),
+        );
+        let lock = Lock::acquire(invocation.state_dir.join("lock")).unwrap();
+        let (starting, started) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut fake = FakeHerdr {
+                responses: vec![
+                    json!({"floats": [{"float_id": "float-1", "visibility": "hidden"}]}),
+                ],
+                calls: Vec::new(),
+            };
+            let server = TestServer::new();
+            starting.send(()).unwrap();
+            let result = tab_focused_with(&invocation, &mut fake, &server.tmux);
+            finished.send((result, fake.calls)).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let premature = done.recv_timeout(Duration::from_millis(100));
+        save_last_tab(&path, "other-tab").unwrap();
+        drop(lock);
+        assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
+        let (result, calls) = done.recv_timeout(Duration::from_secs(5)).unwrap();
+        result.unwrap();
+        assert_eq!(calls, vec![("float.list".to_owned(), json!({}))]);
+        worker.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn absent_opens_float_with_required_options_and_saves_id() {
         let root = temp_dir();
@@ -331,6 +692,8 @@ mod tests {
         );
         let path = workspace_state_path(&invocation.state_dir, "workspace-a");
         assert_eq!(load_saved_id(&path).unwrap().as_deref(), Some("float-1"));
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["last_tab_id"], "tab-id");
         server.stop();
         let _ = fs::remove_dir_all(root);
     }
@@ -339,8 +702,7 @@ mod tests {
     fn hidden_float_selects_current_tab_then_shows_with_focus() {
         let root = temp_dir();
         let invocation = invocation(&root, "workspace-a");
-        let path = workspace_state_path(&invocation.state_dir, "workspace-a");
-        save_id(&path, "float-1").unwrap();
+        let path = write_state(&invocation, json!({"float_id": "float-1"}));
         let mut fake = FakeHerdr {
             responses: vec![
                 json!({"floats": [{"float_id": "float-1", "visibility": "hidden", "workspace_id": "workspace-a"}]}),
@@ -351,6 +713,8 @@ mod tests {
         let server = TestServer::new();
         toggle_with(&invocation, &mut fake, &server.tmux).unwrap();
         assert_eq!(fake.calls[0], ("float.list".to_owned(), json!({})));
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["last_tab_id"], "tab-id");
         assert_eq!(
             fake.calls[1],
             (
