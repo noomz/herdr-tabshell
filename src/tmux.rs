@@ -15,6 +15,7 @@ impl Tmux {
         }
     }
 
+    #[cfg(test)]
     pub fn with_socket_path(socket_path: impl AsRef<Path>, config: impl Into<PathBuf>) -> Self {
         Self {
             socket_args: vec![
@@ -40,6 +41,11 @@ impl Tmux {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
+    pub fn has_session(&self, session: &str) -> bool {
+        let target = format!("={session}");
+        self.run(&["has-session", "-t", &target]).is_ok()
+    }
+
     pub fn ensure_window(
         &self,
         target: &TabTarget,
@@ -53,7 +59,7 @@ impl Tmux {
         };
         let exact_session = format!("={}", target.session);
         let session_pane = format!("{exact_session}:");
-        let session_exists = self.run(&["has-session", "-t", &exact_session]).is_ok();
+        let session_exists = self.has_session(&target.session);
         let mut window_id = if session_exists {
             String::new()
         } else {
@@ -61,7 +67,10 @@ impl Tmux {
         };
 
         if !tab_windows {
-            return self.run(&["display-message", "-p", "-t", &session_pane, "#{window_id}"]);
+            let window_id =
+                self.run(&["display-message", "-p", "-t", &session_pane, "#{window_id}"])?;
+            self.install_exit_hook(&target.session)?;
+            return Ok(window_id);
         }
 
         if session_exists {
@@ -93,7 +102,34 @@ impl Tmux {
         self.append_window_id(&session_pane, &window_id)?;
         self.run(&["rename-window", "-t", &window_id, label])?;
         self.run(&["select-window", "-t", &window_id])?;
+        self.install_exit_hook(&target.session)?;
         Ok(window_id)
+    }
+
+    pub fn mark_shown(&self, session: &str, window_id: &str) -> io::Result<()> {
+        let target = session.to_owned();
+        // Tmux-native window changes do not update this Herdr-selected window marker.
+        self.run(&["set-option", "-t", &target, "@tabshell_shown", window_id])?;
+        Ok(())
+    }
+
+    fn install_exit_hook(&self, session: &str) -> io::Result<()> {
+        let target = session.to_owned();
+        let existing = self.run(&["show-hooks", "-t", &target, "window-unlinked"])?;
+        if existing.contains("hook_window")
+            && existing.contains("@tabshell_shown")
+            && existing.contains("detach-client -s")
+        {
+            return Ok(());
+        }
+        let session_target = tmux_quote(session);
+        let detach = format!("detach-client -s {session_target}");
+        let command = format!(
+            r##"if-shell -F "#{{==:#{{hook_window}},#{{@tabshell_shown}}}}" "{}""##,
+            tmux_escape_double(&detach)
+        );
+        self.run(&["set-hook", "-a", "-t", &target, "window-unlinked", &command])?;
+        Ok(())
     }
 
     fn create_session(
@@ -154,6 +190,26 @@ impl Tmux {
         self.run(&["set-option", "-t", session, "@tabshell_ids", &value])?;
         Ok(())
     }
+}
+
+fn tmux_quote(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in value.chars() {
+        quoted.push_str(&format!("\\u{:08X}", character as u32));
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn tmux_escape_double(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        if matches!(character, '\\' | '"') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn append_env_args(args: &mut Vec<String>, env: &[(String, String)]) {
@@ -225,6 +281,26 @@ mod tests {
                 socket,
                 config_dir: Some(config_dir),
             }
+        }
+
+        fn with_fish() -> Self {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let config_dir = PathBuf::from(format!("/tmp/hf-{}-{id}", std::process::id()));
+            fs::create_dir_all(&config_dir).unwrap();
+            let fish = Command::new("which")
+                .arg("fish")
+                .output()
+                .expect("fish lookup should run");
+            assert!(fish.status.success(), "fish is required for hook tests");
+            let fish = String::from_utf8_lossy(&fish.stdout).trim().to_owned();
+            fs::write(
+                config_dir.join("server.conf"),
+                format!(
+                    "set -g default-shell {fish}\nset -g default-command \"{fish} --no-config\"\nset -g detach-on-destroy on\n"
+                ),
+            )
+            .unwrap();
+            Self::with_config_dir(config_dir)
         }
 
         fn query(&self, args: &[&str]) -> String {
@@ -577,6 +653,167 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    struct ControlClient(std::process::Child);
+
+    impl Drop for ControlClient {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn attach_control_client(server: &Server, session: &str) -> ControlClient {
+        let target = format!("={session}");
+        let child = ControlClient(
+            Command::new("tmux")
+                .args(&server.tmux.socket_args)
+                .args(["-C", "attach-session", "-t", &target])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let clients = server.query(&["list-clients", "-F", "#{client_session}"]);
+            if clients.lines().any(|line| line == session) {
+                return child;
+            }
+            assert!(Instant::now() < deadline, "control client did not attach");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn assert_client_stays_attached(server: &Server, client: &mut ControlClient) {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            assert!(
+                client.0.try_wait().unwrap().is_none(),
+                "control client detached unexpectedly"
+            );
+            assert!(
+                server
+                    .query(&["list-clients", "-F", "#{client_session}"])
+                    .lines()
+                    .any(|session| !session.is_empty()),
+                "control client disappeared"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn assert_client_detaches(client: &mut ControlClient) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = client.0.try_wait().unwrap() {
+                assert!(status.success(), "control attach exited with {status}");
+                return;
+            }
+            assert!(Instant::now() < deadline, "control client did not detach");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_window_exit(server: &Server, window_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if !server.windows().iter().any(|id| id == window_id) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("window {window_id} did not exit");
+    }
+
+    #[test]
+    fn exit_hook_detaches_only_when_the_shown_tab_window_unlinks() {
+        let server = Server::with_fish();
+        let shown = server
+            .tmux
+            .ensure_window(&Server::target("shown-tab", "Shown"), true, &[])
+            .unwrap();
+        let hidden = server
+            .tmux
+            .ensure_window(&Server::target("hidden-tab", "Hidden"), true, &[])
+            .unwrap();
+        let plain = server.query(&[
+            "new-window",
+            "-d",
+            "-t",
+            "=ws",
+            "-n",
+            "Plain",
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]);
+        let sentinel = server.query(&[
+            "new-window",
+            "-d",
+            "-t",
+            "=ws",
+            "-n",
+            "Sentinel",
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]);
+        server.tmux.mark_shown("ws", &shown).unwrap();
+        server.query(&["select-window", "-t", &shown]);
+        let mut client = attach_control_client(&server, "ws");
+
+        for background in [&hidden, &plain] {
+            server.query(&["send-keys", "-t", background, "exit", "Enter"]);
+            wait_for_window_exit(&server, background);
+            assert_client_stays_attached(&server, &mut client);
+            assert!(server.windows().contains(&sentinel));
+        }
+
+        server.query(&["send-keys", "-t", &shown, "exit", "Enter"]);
+        wait_for_window_exit(&server, &shown);
+        assert_client_detaches(&mut client);
+
+        let killed = server
+            .tmux
+            .ensure_window(&Server::target("killed-tab", "Killed"), true, &[])
+            .unwrap();
+        server.tmux.mark_shown("ws", &killed).unwrap();
+        server.query(&["select-window", "-t", &killed]);
+        let mut client = attach_control_client(&server, "ws");
+        server.query(&["kill-window", "-t", &killed]);
+        wait_for_window_exit(&server, &killed);
+        assert_client_detaches(&mut client);
+    }
+
+    #[test]
+    fn exit_hook_installs_once_and_quotes_literal_session_names() {
+        let server = Server::with_fish();
+        let mut target = Server::target("special-tab", "Special");
+        target.session = "ws space '$HOME; quote\"".to_owned();
+        server.query(&["new-session", "-d", "-s", &target.session, "-n", "Sentinel"]);
+        server.query(&[
+            "set-hook",
+            "-t",
+            &target.session,
+            "window-unlinked",
+            "display-message -p custom-hook",
+        ]);
+        let window = server.tmux.ensure_window(&target, true, &[]).unwrap();
+        server.tmux.ensure_window(&target, true, &[]).unwrap();
+        let hooks = server.query(&["show-hooks", "-t", &target.session, "window-unlinked"]);
+        assert_eq!(hooks.matches("@tabshell_shown").count(), 1, "{hooks}");
+        assert!(hooks.contains("custom-hook"), "{hooks}");
+
+        server.tmux.mark_shown(&target.session, &window).unwrap();
+        server.query(&["select-window", "-t", &window]);
+        let mut client = attach_control_client(&server, &target.session);
+        server.query(&["kill-window", "-t", &window]);
+        assert_client_detaches(&mut client);
     }
 
     #[test]
