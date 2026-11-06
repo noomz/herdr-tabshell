@@ -252,12 +252,9 @@ fn tab_focused_with<H: HerdrApi>(
     if state.float_id.is_none() || state.last_tab_id.as_deref() == Some(&invocation.tab_id) {
         return Ok(());
     }
-    if !matches!(
-        current_state(api, &path, &invocation.workspace_id)?,
-        FloatState::Shown(_)
-    ) {
+    let FloatState::Shown(float_id) = current_state(api, &path, &invocation.workspace_id)? else {
         return Ok(());
-    }
+    };
     let workspace = api.call(
         "workspace.get",
         json!({"workspace_id": invocation.workspace_id}),
@@ -286,7 +283,9 @@ fn tab_focused_with<H: HerdrApi>(
     };
     let window_id = tmux.ensure_window(&target, invocation.config.tab_windows, &herdr_env())?;
     tmux.mark_shown(&invocation.workspace_id, &window_id)?;
-    save_last_tab(&path, tab_id)
+    save_last_tab(&path, tab_id)?;
+    api.call("float.show", json!({"float_id": float_id, "focus": true}))?;
+    Ok(())
 }
 
 fn shell_argv(session: &str) -> Vec<OsString> {
@@ -476,6 +475,7 @@ mod tests {
                 responses: vec![
                     json!({"floats": [{"float_id": "float-1", "visibility": "shown"}]}),
                     json!({"workspace": {"active_tab_id": "tab-id"}}),
+                    json!({}),
                 ],
                 calls: Vec::new(),
             };
@@ -487,6 +487,10 @@ mod tests {
                     (
                         "workspace.get".to_owned(),
                         json!({"workspace_id": "workspace-a"})
+                    ),
+                    (
+                        "float.show".to_owned(),
+                        json!({"float_id": "float-1", "focus": true})
                     ),
                 ]
             );
@@ -540,8 +544,16 @@ mod tests {
         };
         let server = TestServer::new();
         tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
-        assert_eq!(fake.calls.len(), 2);
-        assert_eq!(fake.calls[1].0, "workspace.get");
+        assert_eq!(
+            fake.calls,
+            vec![
+                ("float.list".to_owned(), json!({})),
+                (
+                    "workspace.get".to_owned(),
+                    json!({"workspace_id": "workspace-a"})
+                ),
+            ]
+        );
         assert!(!server.socket.exists());
         assert_eq!(fs::read(&path).unwrap(), before);
         let _ = fs::remove_dir_all(root);
@@ -560,14 +572,26 @@ mod tests {
                 json!({"floats": [{"float_id": "float-1", "visibility": "shown"}]}),
                 json!({"workspace": {"active_tab_id": "current-tab"}}),
                 json!({"tab": {"label": "current label"}}),
+                json!({}),
             ],
             calls: Vec::new(),
         };
         let server = TestServer::new();
         tab_focused_with(&invocation, &mut fake, &server.tmux).unwrap();
         assert_eq!(
-            fake.calls[2],
-            ("tab.get".to_owned(), json!({"tab_id": "current-tab"}))
+            fake.calls,
+            vec![
+                ("float.list".to_owned(), json!({})),
+                (
+                    "workspace.get".to_owned(),
+                    json!({"workspace_id": "workspace-a"})
+                ),
+                ("tab.get".to_owned(), json!({"tab_id": "current-tab"})),
+                (
+                    "float.show".to_owned(),
+                    json!({"float_id": "float-1", "focus": true})
+                ),
+            ]
         );
         assert_eq!(
             server.query(&[
