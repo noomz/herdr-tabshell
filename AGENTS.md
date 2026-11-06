@@ -2,14 +2,14 @@
 
 A herdr plugin that gives each herdr tab its own floating tmux shell on `prefix+f`.
 
-Status: planning. This repo holds docs, with no code yet. Do not start a build ticket until the user says to.
+Status: building. The Rust crate is scaffolded; build tickets land one at a time. Do not start a build ticket until the user says to. Build tickets delegate implementation, builds, and tests to `codex exec -s workspace-write` (see the map's Notes); Claude briefs and reviews.
 
 The plan lives in `.wayfinder/map.md` and its tickets. `.wayfinder/README.md` explains how to find the next ticket and record a resolution. Vocabulary is in `GLOSSARY.md`.
 
 ## Rules
 
 - Do not kill the user's herdr sessions or kitty windows. A new herdr binary needs a live handoff; tell the user what to run.
-- Do not touch the live `herdr-floax` tmux socket when testing. Use a throwaway socket.
+- Test tmux on a throwaway `-S` socket, never the live `herdr-tabshell` socket or any of the user's tmux servers.
 - Do not use `mv` on a worktree. Use `git -C ../herdr worktree move`, or `worktree remove` to delete one.
 - Leave the unrelated dirty files in the `../herdr` main checkout alone. Do herdr work in the worktree.
 - Local git only for this repo. Add no remote until the user asks.

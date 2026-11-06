@@ -1,6 +1,10 @@
 mod config;
 #[allow(dead_code)]
 mod herdr;
+#[allow(dead_code)]
+mod lock;
+#[allow(dead_code)]
+mod tmux;
 
 use std::process::ExitCode;
 

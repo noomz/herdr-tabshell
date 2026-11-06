@@ -6,6 +6,7 @@ description = "A persistent shell for each herdr tab"
 license = "MIT"
 
 [dependencies]
+libc = "0.2"
 serde_json = "1"
 
 [profile.release]
