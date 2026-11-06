@@ -1,0 +1,23 @@
+id = "herdr-tabshell"
+name = "Tab shell"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+platforms = ["macos", "linux"]
+description = "A persistent shell for each herdr tab"
+
+[[actions]]
+id = "toggle"
+title = "Toggle tab shell"
+command = ["target/release/herdr-tabshell", "toggle"]
+
+[[panes]]
+id = "shell"
+title = "Tab shell"
+placement = "float"
+width = "80%"
+height = "80%"
+command = ["target/release/herdr-tabshell", "shell"]
+
+[[events]]
+on = "tab.focused"
+command = ["target/release/herdr-tabshell", "tab-focused"]
