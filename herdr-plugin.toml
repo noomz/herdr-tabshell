@@ -3,11 +3,11 @@ name = "Tab shell"
 version = "0.1.0"
 min_herdr_version = "0.9.5"
 platforms = ["macos", "linux"]
+description = "A persistent shell for each herdr tab"
 
 # Needs cargo (Rust) on PATH. `herdr plugin link` skips this; run it yourself.
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
-description = "A persistent shell for each herdr tab"
 
 [[actions]]
 id = "toggle"
