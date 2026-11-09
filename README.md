@@ -8,7 +8,7 @@ A [herdr](https://github.com/herdrdev/herdr) plugin that gives each herdr tab it
 - Move the float by dragging its title. Resize it by dragging its right or bottom border. It keeps its size and position until it closes.
 
 > [!IMPORTANT]
-> **This plugin needs a patched herdr.** Stock herdr (0.9.5) has no floating plugin panes. This plugin uses floats plus three patches: hide on a click outside, focus from a key press, and one float per workspace. They live on the `local` branch of [noomz/herdr](https://github.com/noomz/herdr/tree/local). On stock herdr, the first key press fails with an error. `min_herdr_version` cannot express this requirement.
+> **This plugin needs a patched herdr.** Stock herdr (0.9.5) has no floating plugin panes. This plugin uses floats plus three patches: hide on a click outside, focus from a key press, and one float per workspace. They live on the `local` branch of [noomz/herdr](https://github.com/noomz/herdr/tree/local). On stock herdr, `herdr plugin install` fails, because stock herdr does not know the manifest's `placement = "float"`. `min_herdr_version` cannot express this requirement.
 
 ## Requirements
 
