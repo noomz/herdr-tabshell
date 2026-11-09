@@ -92,6 +92,18 @@ After editing, reload the running server:
 tmux -L herdr-tabshell source-file "$(herdr plugin config-dir herdr-tabshell)/tmux.conf"
 ```
 
+**Drop shadow.** The patched herdr can draw a drop shadow under floats. It is a herdr setting, not a plugin setting, and it is off by default. Add it to `~/.config/herdr/config.toml`:
+
+```toml
+[ui.float_shadow]
+enabled = true
+color = "#1d2021"   # hex, a color name, rgb(r,g,b), or "none" to only dim the text below
+width = 2           # columns right of the float, 0 to 4
+height = 1          # rows below the float, 0 to 4
+```
+
+Then run `herdr server reload-config`. A terminal cell is about twice as tall as it is wide, so `width = 2` and `height = 1` look even. `float_shadow = true` under `[ui]` gives a black shadow one cell wide. A click on the shadow counts as a click outside, so the float hides.
+
 ## Known limits
 
 - **Two clients on one workspace share its float.** If two terminals attach to the same workspace, both see the same float.
