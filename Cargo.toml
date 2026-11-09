@@ -3,7 +3,9 @@ name = "herdr-tabshell"
 version = "0.1.0"
 edition = "2021"
 description = "A persistent shell for each herdr tab"
-license = "MIT"
+license = "Apache-2.0"
+repository = "https://github.com/noomz/herdr-tabshell"
+readme = "README.md"
 
 [dependencies]
 libc = "0.2"
