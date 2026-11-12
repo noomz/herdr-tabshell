@@ -11,8 +11,9 @@ fn main() -> ExitCode {
         Some("toggle") => command_exit(command::run_toggle()),
         Some("shell") => command_exit(command::run_shell()),
         Some("tab-focused") => command_exit(command::run_tab_focused()),
+        Some("hide") => command_exit(command::run_hide()),
         _ => {
-            eprintln!("usage: herdr-tabshell <toggle|shell|tab-focused>");
+            eprintln!("usage: herdr-tabshell <toggle|shell|tab-focused|hide>");
             ExitCode::from(64)
         }
     }

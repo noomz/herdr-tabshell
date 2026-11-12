@@ -288,6 +288,25 @@ fn tab_focused_with<H: HerdrApi>(
     Ok(())
 }
 
+/// Hides the float whose close button was clicked. The target comes only from the
+/// server-built `float_target`; without one this fails rather than guessing a float.
+fn hide_with<H: HerdrApi>(context_json: &str, api: &mut H) -> io::Result<()> {
+    let context: Value = serde_json::from_str(context_json)
+        .map_err(|error| io::Error::other(format!("invalid HERDR_PLUGIN_CONTEXT_JSON: {error}")))?;
+    let target = &context["float_target"];
+    let (Some(boot_id), Some(float_id)) = (target["boot_id"].as_str(), target["float_id"].as_str())
+    else {
+        return Err(io::Error::other(
+            "hide runs only from the float close button: no float_target in HERDR_PLUGIN_CONTEXT_JSON",
+        ));
+    };
+    api.call(
+        "float.hide_target",
+        json!({"boot_id": boot_id, "float_id": float_id}),
+    )?;
+    Ok(())
+}
+
 fn shell_argv(session: &str) -> Vec<OsString> {
     ["-L", "herdr-tabshell", "attach-session", "-t"]
         .into_iter()
@@ -331,6 +350,13 @@ pub fn run_toggle() -> io::Result<()> {
 
 pub fn run_shell() -> io::Result<()> {
     shell_entry()
+}
+
+pub fn run_hide() -> io::Result<()> {
+    hide_with(
+        &required_env("HERDR_PLUGIN_CONTEXT_JSON")?,
+        &mut SocketHerdr,
+    )
 }
 
 pub fn run_tab_focused() -> io::Result<()> {
@@ -902,6 +928,48 @@ mod tests {
     impl Drop for TestServer {
         fn drop(&mut self) {
             self.stop();
+        }
+    }
+
+    #[test]
+    fn hide_calls_only_hide_target_for_the_clicked_float() {
+        let context = json!({
+            "workspace_id": "workspace-a",
+            "float_target": {
+                "boot_id": "boot-1", "float_id": "f7", "workspace_id": "workspace-a",
+                "plugin_id": "herdr-tabshell", "entrypoint": "shell",
+                "controls_revision": "rev", "button_id": "close"
+            }
+        });
+        for _ in 0..2 {
+            let mut fake = FakeHerdr {
+                responses: vec![json!({"float": {"float_id": "f7", "visibility": "hidden"}})],
+                calls: Vec::new(),
+            };
+            hide_with(&context.to_string(), &mut fake).unwrap();
+            assert_eq!(
+                fake.calls,
+                vec![(
+                    "float.hide_target".to_owned(),
+                    json!({"boot_id": "boot-1", "float_id": "f7"})
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn hide_without_float_target_fails_without_calling_herdr() {
+        for context in [
+            json!({"workspace_id": "workspace-a", "tab_id": "tab-id"}).to_string(),
+            json!({"float_target": {"float_id": "f7"}}).to_string(),
+            "not json".to_owned(),
+        ] {
+            let mut fake = FakeHerdr {
+                responses: Vec::new(),
+                calls: Vec::new(),
+            };
+            assert!(hide_with(&context, &mut fake).is_err());
+            assert!(fake.calls.is_empty());
         }
     }
 

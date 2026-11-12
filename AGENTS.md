@@ -6,8 +6,8 @@ It needs the patched herdr on `noomz/herdr` branch `local`: floats, hide on a cl
 
 ## Layout
 
-- `herdr-plugin.toml`: the manifest. It has the `toggle` action, the `shell` float pane, and the `tab.focused` hook. All of them run `target/release/herdr-tabshell`.
-- `src/command.rs`: the `toggle`, `shell` and `tab-focused` subcommands, and the per-workspace float state.
+- `herdr-plugin.toml`: the manifest. It has the `toggle` and `hide` actions, the `shell` float pane with its `close` title-bar button, and the `tab.focused` hook. All of them run `target/release/herdr-tabshell`.
+- `src/command.rs`: the `toggle`, `shell`, `tab-focused` and `hide` subcommands, and the per-workspace float state. `hide` reads only the server-built `float_target` and calls `float.hide_target`; it never shows or opens a float.
 - `src/tmux.rs`: `ensure_window` (tab-ID bindings in `@herdr_tab`), the exit hook, and the tmux tests.
 - `src/herdr.rs`: a raw socket client for herdr. `src/lock.rs`: a `flock` held across each command. `src/config.rs`: parses `tabshell.conf`.
 - `tmux.conf`: the shipped server config. It runs before the user's `tmux.conf`.

@@ -14,6 +14,12 @@ id = "toggle"
 title = "Toggle tab shell"
 command = ["target/release/herdr-tabshell", "toggle"]
 
+# Run by the float's close button. It hides only the clicked float and never shows or opens one.
+[[actions]]
+id = "hide"
+title = "Hide tab shell"
+command = ["target/release/herdr-tabshell", "hide"]
+
 [[panes]]
 id = "shell"
 title = "Tab shell"
@@ -21,6 +27,7 @@ placement = "float"
 width = "80%"
 height = "80%"
 command = ["target/release/herdr-tabshell", "shell"]
+buttons = [{ id = "close", icon = "x", action = "hide" }]
 
 [[events]]
 on = "tab.focused"

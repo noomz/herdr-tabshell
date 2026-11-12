@@ -55,6 +55,7 @@ A [herdr](https://github.com/herdrdev/herdr) plugin that gives each herdr tab it
 | Action | Result |
 |---|---|
 | `prefix+f` | Show this workspace's float with the current tab's shell, or hide it |
+| Click `x` in the float's title bar | Hide that float. The shell keeps running, and the next `prefix+f` shows it again at the same size and position. Needs a herdr with float title-bar buttons; an older herdr shows no button. |
 | Click outside the float | Hide it, and the click goes to whatever you clicked |
 | Switch tab with the keyboard while the float shows | The float follows the new tab and keeps focus |
 | Click a tab in the tab bar | Counts as a click outside, so the float hides |
